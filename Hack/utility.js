@@ -51,6 +51,27 @@ export function get_all_servers_iteratively(ns){
   return visited
 }
 
+export function install_hacks_dirty(ns){
+	for(let server of get_all_servers(ns)){
+    try{
+      //open ports
+      ns.brutessh(server)
+      ns.ftpcrack(server)
+      ns.httpworm(server)
+      ns.sqlinject(server)
+
+      //become admin
+      ns.nuke(server)
+
+      //server copy file to target
+      ns.scp("hack.js", server, "home")
+      ns.scp("grow.js", server, "home")
+      ns.scp("weaken.js", server, "home")
+      }catch{}
+		}
+	}
+}
+
 export function install_hacks(ns){
   const servers = get_all_servers(ns)
 
@@ -71,6 +92,13 @@ export function install_hacks(ns){
 				ns.sqlinject(server)
 			}
 
+      try{
+        ns.brutessh(server)
+        ns.ftpcrack(server)
+        ns.httpworm(server)
+        ns.sqlinject(server)
+      }catch{}
+
 			if (ns.getServerNumPortsRequired(server) <= server_data.openPortCount && server_data.hasAdminRights == false) {
 				//access admin
 				ns.nuke(server)
@@ -85,4 +113,3 @@ export function install_hacks(ns){
 		}
 	}
 }
-
