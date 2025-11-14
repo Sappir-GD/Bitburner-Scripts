@@ -39,7 +39,6 @@ export async function main(ns: NS) {
         hack: { required: 0, current: 0},
         grow: { required: 0, current: 0},
         weaken: { required: 0, current: 0},
-
       }
       target: {
         server: "",
@@ -49,9 +48,7 @@ export async function main(ns: NS) {
 
     servers.available = create_available_servers(servers.all)
 		
-		for (const server of servers.available) {
-			check_server_quality(server)
-		}
+		state.target = check_server_quality(server)
 
     prep()
     main_hack()
@@ -63,8 +60,9 @@ export async function main(ns: NS) {
       //set server to max money and weaken to min_sec
       while (is_server_prepped(state.target.server) === false) {
         print_server_values(state.target.server)
-
-        prep_hack(state.target.server)
+        
+        //calc_threads needs to know if it is prepped
+        calc_threads(state.target.server, false)
 
         ns.print("PrepHacking: " + state.target.server)
         print_threads()
@@ -233,72 +231,80 @@ export async function main(ns: NS) {
       return hackable_servers
     }
 
-    //TODO: return the state rather than mutate
-		function check_server_quality(passed_target: string) {
-      //check if its at least half my level or if its level 0...
-      if (ns.getHackingLevel() / 2 >= ns.getServerRequiredHackingLevel(passed_target) || ns.getServerRequiredHackingLevel(passed_target) == 0) {
-        //calculate based on how good it gets
-        let growth_amount = ns.getServerGrowth(passed_target)
-        let max_money = ns.getServerMaxMoney(passed_target)
-        let min_security = ns.getServerMinSecurityLevel(passed_target)
+		function check_server_quality(passed_servers) {
+      let target_server = {
+        server = state.target.server
+        quality = state.target.quality
+      }
+      for(server of passed_servers){
+        //check if its at least half my level or if its level 0...
+        if (ns.getHackingLevel() / 2 >= ns.getServerRequiredHackingLevel(server) || ns.getServerRequiredHackingLevel(server) == 0) {
+          //calculate based on how good it gets
+          let growth_amount = ns.getServerGrowth(server)
+          let max_money = ns.getServerMaxMoney(server)
+          let min_security = ns.getServerMinSecurityLevel(server)
 
-        let server_quality
-        if (ns.getHackingLevel() < CONFIG.QUALITY_CALC_LEVEL_THRESHOLD){
-          server_quality = (growth_amount * max_money) / min_security
-        }else{
-          server_quality = max_money / min_security
-        }
-        //ns.tprint(passed_target + " quality: " + server_quality.toLocaleString("en-US"))
+          let server_quality
+          if (ns.getHackingLevel() < CONFIG.QUALITY_CALC_LEVEL_THRESHOLD){
+            server_quality = (growth_amount * max_money) / min_security
+          }else{
+            server_quality = max_money / min_security
+          }
+          //ns.tprint(server + " quality: " + server_quality.toLocaleString("en-US"))
 
-        //doesn't account for equal quality
-        if (highest_quality_in_server < server_quality) {
-          highest_quality_in_server = server_quality
-          state.target.server = passed_target
+          //doesn't account for equal quality
+          if (target_server.qualaity < server_quality) {
+            target_server.quality = server_quality
+            target_server.server = server
+          }
         }
       }
+      return target_server
 		}
     
-    //TODO: return the state rather than mutate
-		function prep_hack(passed_target: string) {
-			let grow_time = ns.getGrowTime(passed_target)
-			let hack_time = ns.getHackTime(passed_target)
-			let weaken_time = ns.getWeakenTime(passed_target)
-			let max_time = Math.max(grow_time, hack_time, weaken_time)
-
-			//comes from outside of the function
-			state.longest_time = max_time
-
-			//get amount of threads needed //its okay I didn't pass something in
-			let grow_threads = calc_grow_threads(passed_target)
-			let weaken_threads = calc_weaken_threads(passed_target)
-			weaken_threads += Math.ceil(ns.growthAnalyzeSecurity(grow_threads, passed_target)/ns.weakenAnalyze(1))
-			
-
-			//comes from outside of the function
-			state.threads.grow.required = grow_threads
-			state.threads.weaken.required = Math.ceil(weaken_threads * CONFIG.WEAKEN_BUFFER_MULTIPLIER)
-		}
-  
-    //TODO: return the state rather than mutate
-		function calc_threads(passed_target: string) {
+		function calc_threads(passed_server: string, is_prep: boolean) {
+      const return_state = {
+        longest_time = state.longest_time
+        threads: {
+          hack: { required: 0, current: 0},
+          grow: { required: 0, current: 0},
+          weaken: { required: 0, current: 0},
+        }
+      }
 			//check for the longest time
-			let grow_time = ns.getGrowTime(passed_target)
-			let hack_time = ns.getHackTime(passed_target)
-			let weaken_time = ns.getWeakenTime(passed_target)
+			let grow_time = ns.getGrowTime(passed_server)
+			let hack_time = ns.getHackTime(passed_server)
+			let weaken_time = ns.getWeakenTime(passed_server)
 			let max_time = Math.max(grow_time, hack_time, weaken_time)
 
 			//comes from outside of the function
-			state.longest_time = max_time
+			return_state.longest_time = max_time
 
-			//calculate threads needed
-			let hack_threads = calc_hack_threads(passed_target, target_percentage)
-			let grow_threads = calc_grow_threads(passed_target, target_percentage)
-			let weaken_threads = Math.ceil((ns.hackAnalyzeSecurity(hack_threads, passed_target)) + (ns.growthAnalyzeSecurity(grow_threads, passed_target, 1)) / ns.weakenAnalyze(1))
+      if(is_prep){
+        //get amount of threads needed //its okay I didn't pass something in
+        let grow_threads = calc_grow_threads(passed_server)
+        let weaken_threads = calc_weaken_threads(passed_server)
+        weaken_threads += Math.ceil(ns.growthAnalyzeSecurity(grow_threads, passed_server)/ns.weakenAnalyze(1))
+        
 
-			//comes from outside of the function
-			state.threads.hack.required = hack_threads
-			state.threads.grow.required = grow_threads
-			state.threads.weaken.required = Math.ceil(weaken_threads * CONFIG.WEAKEN_BUFFER_MULTIPLIER)
+        //comes from outside of the function
+        return_state.threads.grow.required = grow_threads
+        return_state.threads.weaken.required = Math.ceil(weaken_threads * CONFIG.WEAKEN_BUFFER_MULTIPLIER)
+
+      }
+      else if(!is_prep){
+        //calculate threads needed
+        let hack_threads = calc_hack_threads(passed_server, target_percentage)
+        let grow_threads = calc_grow_threads(passed_server, target_percentage)
+        let weaken_threads = Math.ceil((ns.hackAnalyzeSecurity(hack_threads, passed_server)) + (ns.growthAnalyzeSecurity(grow_threads, passed_server, 1)) / ns.weakenAnalyze(1))
+        
+        //comes from outside of the function
+        return_state.threads.hack.required = hack_threads
+        return_state.threads.grow.required = grow_threads
+        return_state.threads.weaken.required = Math.ceil(weaken_threads * CONFIG.WEAKEN_BUFFER_MULTIPLIER)
+      }
+      return return_state
+
 		}
     
     //TODO: finish cleaning up and return a proper object
@@ -359,6 +365,25 @@ export async function main(ns: NS) {
 				} else return false
 			}
 		}
+
+    function analyze_threads(passed_servers){
+      let estimated_threads{
+        hack: []
+        grow: []
+        weaken: []
+      }
+
+      for(server of passed_servers){
+        
+      }
+    }
+
+    function calculate_total_ram(passed_servers){
+      let total_ram = 0
+      for(server of passed_server){
+        total_ram += ns.getServerMaxRam(server)
+      }
+    }
 
 		function calc_hack_threads(passed_target: string, passed_pecentage: number) {
 			const money = Math.max(ns.getServerMoneyAvailable(passed_target), 1)
