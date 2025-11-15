@@ -11,10 +11,16 @@ export async function main(ns: NS) {
 		//opens ports gain access and nuke
 		install_hacks(ns)
 
+		interface ThreadState{
+			hack: {required: number, current: number},
+			grow: {required: number, current: number},
+			weaken: {required: number, current: number},
+		}
+
 		//target server
     const script_ram = {
-      hack_ram: ns.getScriptRam("hack.js", "home")
-		  grow_ram: ns.getScriptRam("grow.js", "home")
+      hack_ram: ns.getScriptRam("hack.js", "home"),
+		  grow_ram: ns.getScriptRam("grow.js", "home"),
 		  weaken_ram: ns.getScriptRam("weaken.js", "home")
     }
 
@@ -23,35 +29,40 @@ export async function main(ns: NS) {
       WEAKEN_BUFFER_MULTIPLIER: 1.05,
       TARGET_HACK_PERCENT: 0.01,
       MONEY_RESTART_THRESHOLD: 0.75,
-      QUALITY_CALC_LEVEL_THRESHOLD: 300
+      QUALITY_CALC_LEVEL_THRESHOLD: 300,
+      SCRIPT_LIMIT: 3000 //4000 But just to be safe
     }
     
     const servers = {
-      all: get_all_servers(ns)
-		  available: []
+      all: get_all_servers(ns),
+		  available: [] as string[]
     }
     
     const state = {
-      is_playing: true
-      longest_time: -1
+      is_playing: true,
+      longest_time: -1,
+      script_amount: 0,
       
       threads: {
         hack: { required: 0, current: 0},
         grow: { required: 0, current: 0},
         weaken: { required: 0, current: 0},
-      }
+      },
+
       target: {
         server: "",
         quality: 0
       }
     }
 
+		let is_playing = true
+
     servers.available = create_available_servers(servers.all)
 		
-		state.target = check_server_quality(server)
+		state.target = check_server_quality(servers.available)
 
-    prep()
-    main_hack()
+    await prep()
+    await main_hack()
     
     async function prep(){
       ns.print("\nChecking Prep for " + state.target.server)
@@ -62,14 +73,19 @@ export async function main(ns: NS) {
         print_server_values(state.target.server)
         
         //calc_threads needs to know if it is prepped
-        calc_threads(state.target.server, false)
+        const thread_state = calc_threads(state.target.server, true)
+        state.threads = thread_state.threads
+        state.longest_time = thread_state.longest_time
 
         ns.print("PrepHacking: " + state.target.server)
-        print_threads()
 
-        for (const target of servers.available) {
-          hack(target)
-        }
+        const allocated_results = execute_batch(servers.available)
+        state.threads.hack.current = allocated_results.current_threads_count.hack
+        state.threads.grow.current = allocated_results.current_threads_count.grow
+        state.threads.weaken.current = allocated_results.current_threads_count.weaken
+        state.script_amount = allocated_results.script_counter
+
+        print_threads()
 
         //current, required ie total_threads.current
         const total_threads = calculate_total_threads(state.threads)
@@ -82,9 +98,12 @@ export async function main(ns: NS) {
         }
 
         //wait to finish
-        ns.print("Estimated time: " + ns.tFormat(state.longest_time))
+        ns.print("allocated time: " + ns.tFormat(state.longest_time))
         await ns.sleep(state.longest_time + 1000)
-        reset_loop_variables()
+        const reset = reset_loop_variables()
+        state.longest_time = reset.longest_time
+        state.threads = reset.threads
+        state.script_amount = reset.script_amount
       }
     }
 
@@ -96,23 +115,19 @@ export async function main(ns: NS) {
       while (true) {
         //main loop
         ns.print("\nCurrent_loop: " + current_loop + " for " + state.target.server)
-        calc_threads(state.target.server)
+        const thread_state = calc_threads(state.target.server, false)
+        state.threads = thread_state.threads
+        state.longest_time = thread_state.longest_time
 
         print_server_values(state.target.server)
-        print_threads(state.threads)
+        print_threads()
 
-        //if required total ram is smaller than the space remaining don't do it
-        ns.print("Estimated ram usage: " + calculate_ram_usage())
-        //subtract the home cost 10 so i can test
-        ns.print("Available Ram: " + (get_total_ram() - get_used_ram() - 10))
-        if (calculate_ram_usage() < get_total_ram() - get_used_ram() - 10 && check_available_small_ram()) {
-          ns.print("Hacking...")
-          //TODO:not quite there yet
-          hack(servers.available)
-        } else {
-          ns.print("Aborting...")
-          ns.print("Duration: " + ns.tFormat(state.longest_time))
-        }
+        ns.print("Hacking...")
+        const allocated_results = execute_batch(servers.available)
+        state.threads.hack.current = allocated_results.current_threads_count.hack
+        state.threads.grow.current = allocated_results.current_threads_count.grow
+        state.threads.weaken.current = allocated_results.current_threads_count.weaken
+        state.script_amount = allocated_results.script_counter 
 
         const total_threads = calculate_total_threads(state.threads)
 
@@ -128,6 +143,7 @@ export async function main(ns: NS) {
         const reset = reset_loop_variables()
         state.longest_time = reset.longest_time
         state.threads = reset.threads
+        state.script_amount = reset.script_amount
 
         current_loop += 1
 
@@ -143,25 +159,26 @@ export async function main(ns: NS) {
       }
     }
 
-    function is_server_prepped(passed_server){
+    function is_server_prepped(passed_server : string){
       const max_money = ns.getServerMaxMoney(passed_server)
       const money = ns.getServerMoneyAvailable(passed_server)
       const min_sec = ns.getServerMinSecurityLevel(passed_server)
       const sec_level = ns.getServerSecurityLevel(passed_server)
 
-      return max_money === money and min_sec === sec_level
+      return max_money === money && min_sec === sec_level
     }
 
-    function print_server_values(passed_server){
+    function print_server_values(passed_server : string){
 			ns.print("Money: " + ns.getServerMoneyAvailable(passed_server) + " / " + ns.getServerMaxMoney(passed_server))
 			ns.print("Security: " + ns.getServerSecurityLevel(passed_server) + " / " + ns.getServerMinSecurityLevel(passed_server))
     }
 
-		function print_threads(threads) {
+		function print_threads() {
 			ns.print("Amount of threads: " + (state.threads.hack.required + state.threads.grow.required + state.threads.weaken.required))
 			ns.print("Amount of Hack Thread: " + state.threads.hack.required)
 			ns.print("Amount of Grow Thread: " + state.threads.grow.required)
 			ns.print("Amount of Weaken Thread: " + state.threads.weaken.required)
+			ns.print("Total script usage: " + state.script_amount)
 		}
 
 		//set a boolean to break out of all loops
@@ -169,60 +186,27 @@ export async function main(ns: NS) {
 			is_playing = false
 		}
 
-		function check_available_small_ram() {
-			for (const target of servers.available) {
-				const free_ram = ns.getServerMaxRam(target) - ns.getServerUsedRam(target)
-				if (free_ram >= hack_ram || free_ram >= grow_ram || free_ram >= weaken_ram) {
-					return true
-				}
-			}
-			return false
-		}
-
-    function calculate_total_threads(threads){
+    function calculate_total_threads(threads : ThreadState){
       return{
-        required: threads.hack.required + threads.grow.required  + threads.weaken.required
-        current:  threads.hack.current  + threads.grow.current   + threads.weaken.current,
+        required: threads.hack.required + threads.grow.required  + threads.weaken.required,
+        current:  threads.hack.current  + threads.grow.current   + threads.weaken.current
       }
     }
-
-		function calculate_ram_usage() {
-			const hack_ram_usage = state.threads.hack.required * hack_ram
-			const grow_ram_usage = state.threads.grow.required * grow_ram
-			const weaken_ram_usage = state.threads.weaken.required * weaken_ram
-			return hack_ram_usage + grow_ram_usage + weaken_ram_usage
-		}
-
-		function get_total_ram() {
-			let max_ram = 0
-			let used_ram = 0
-			for (const server of servers.available) {
-				max_ram += ns.getServerMaxRam(server)
-			}
-			return max_ram
-		}
-
-		function get_used_ram() {
-			let used_ram = 0
-			for (const server of servers.available) {
-				used_ram += ns.getServerUsedRam(server)
-			}
-			return used_ram
-		}
 
 		function reset_loop_variables() {
       return{
         longest_time: -1,
         threads: {
-          hack{ required: 0, current: 0},
-          grow{ required: 0, current: 0},
-          weaken{ required: 0, current: 0},
-        }
+          hack: { required: 0, current: 0},
+          grow: { required: 0, current: 0},
+          weaken: { required: 0, current: 0}
+        },
+        script_amount: 0
       }
-		}
+    }
 
-    function create_available_servers(passed_servers){
-      let hackable_servers
+    function create_available_servers(passed_servers : string[]){
+      let hackable_servers = []
       for(const server of passed_servers){
         if (ns.getHackingLevel() >= ns.getServerRequiredHackingLevel(server) && ns.hasRootAccess(server)) {
           hackable_servers.push(server)
@@ -231,12 +215,12 @@ export async function main(ns: NS) {
       return hackable_servers
     }
 
-		function check_server_quality(passed_servers) {
+		function check_server_quality(passed_servers : string[]) {
       let target_server = {
-        server = state.target.server
-        quality = state.target.quality
+        server: state.target.server,
+        quality: state.target.quality
       }
-      for(server of passed_servers){
+      for(const server of passed_servers){
         //check if its at least half my level or if its level 0...
         if (ns.getHackingLevel() / 2 >= ns.getServerRequiredHackingLevel(server) || ns.getServerRequiredHackingLevel(server) == 0) {
           //calculate based on how good it gets
@@ -253,7 +237,7 @@ export async function main(ns: NS) {
           //ns.tprint(server + " quality: " + server_quality.toLocaleString("en-US"))
 
           //doesn't account for equal quality
-          if (target_server.qualaity < server_quality) {
+          if (target_server.quality < server_quality) {
             target_server.quality = server_quality
             target_server.server = server
           }
@@ -262,13 +246,14 @@ export async function main(ns: NS) {
       return target_server
 		}
     
+    
 		function calc_threads(passed_server: string, is_prep: boolean) {
       const return_state = {
-        longest_time = state.longest_time
+        longest_time: state.longest_time,
         threads: {
           hack: { required: 0, current: 0},
           grow: { required: 0, current: 0},
-          weaken: { required: 0, current: 0},
+          weaken: { required: 0, current: 0}
         }
       }
 			//check for the longest time
@@ -294,8 +279,8 @@ export async function main(ns: NS) {
       }
       else if(!is_prep){
         //calculate threads needed
-        let hack_threads = calc_hack_threads(passed_server, target_percentage)
-        let grow_threads = calc_grow_threads(passed_server, target_percentage)
+        let hack_threads = calc_hack_threads(passed_server, CONFIG.TARGET_HACK_PERCENT)
+        let grow_threads = calc_grow_threads(passed_server, CONFIG.TARGET_HACK_PERCENT)
         let weaken_threads = Math.ceil((ns.hackAnalyzeSecurity(hack_threads, passed_server)) + (ns.growthAnalyzeSecurity(grow_threads, passed_server, 1)) / ns.weakenAnalyze(1))
         
         //comes from outside of the function
@@ -304,85 +289,88 @@ export async function main(ns: NS) {
         return_state.threads.weaken.required = Math.ceil(weaken_threads * CONFIG.WEAKEN_BUFFER_MULTIPLIER)
       }
       return return_state
-
-		}
+		}		
     
-    //TODO: finish cleaning up and return a proper object
-		function hack(passed_servers) {
-      for(server in servers){
-        const hack_check = (state.threads.hack.current < state.threads.hack.required)
-        const grow_check = (state.threads.grow.current < state.threads.grow.required)
-        const weaken_check = (state.threads.weaken.current < state.threads.weaken.required)
-
-        let available_ram = ns.getServerMaxRam(passed_target) - ns.getServerUsedRam(passed_target)
-        //I need the space to test things
-        if (passed_target == "home") {
-          available_ram = ns.getServerMaxRam(passed_target) - (ns.getServerUsedRam(passed_target) + CONFIG.HOME_RAM_RESERVE)
-        }
-        let has_ram = check_ram(available_ram)
-
-
-        if (grow_check && has_ram) {
-          state.threads.grow.current = check_helper(state.threads.grow.required, state.threads.grow.current, "grow.js", ns.getGrowTime(state.target.server))
-        }
-        if (hack_check && has_ram) {
-          state.threads.hack.current = check_helper(state.threads.hack.required, state.threads.hack.current, "hack.js", ns.getHackTime(state.target.server))
-        }
-        if (weaken_check && has_ram) {
-          state.threads.weaken.current = check_helper(state.threads.weaken.required, state.threads.weaken.current, "weaken.js", ns.getWeakenTime(state.target.server))
-        }
-
-        //check if you need anymore hacks
-        if (hack_check && grow_check && weaken_check)
-          return true
-        else
-          return false
-      }
+    function execute_batch(passed_servers : string[]){
+      const allocated_results = allocate_threads(passed_servers)
+      execute_threads(allocated_results.allocated_threads)
+      return allocated_results
     }
 
-			function check_helper(required: number, current: number, script: string, duration: number) {
-				const script_ram = ns.getScriptRam(script, "home")
+    function allocate_threads(passed_servers : string[]) {
+      const allocated_result = {
+        allocated_threads: {
+            hack: [] as Array<{server: string, amount: number}>,
+            grow: [] as Array<{server: string, amount: number}>,
+            weaken: [] as Array<{server: string, amount: number}>
+        },
 
-				const possible_thread_amount = Math.floor(available_ram / script_ram)
-				const needed_threads = required - current
+        current_threads_count: {
+            hack: 0,
+            grow: 0,
+            weaken: 0
+        },
+        
+        script_counter: count_number_of_scripts_servers(passed_servers)
+      }
+      
+      for (const server of passed_servers) {
+        let server_available_ram = calculate_server_available_ram(server)
+        if (allocated_result.script_counter >= CONFIG.SCRIPT_LIMIT) break
+        if (server_available_ram > script_ram.hack_ram && state.threads.hack.required - allocated_result.current_threads_count.hack > 0) {
+          const possible_thread_amount = Math.floor(server_available_ram / script_ram.hack_ram)
+          const threads_to_use = Math.min(possible_thread_amount, state.threads.hack.required - allocated_result.current_threads_count.hack)
+          allocated_result.current_threads_count.hack += threads_to_use
+          server_available_ram -= threads_to_use * script_ram.hack_ram
+          allocated_result.allocated_threads.hack.push({ server, amount: threads_to_use })
+          allocated_result.script_counter += 1
+        }
+        if (allocated_result.script_counter >= CONFIG.SCRIPT_LIMIT) break
+        if (server_available_ram > script_ram.grow_ram && state.threads.grow.required - allocated_result.current_threads_count.grow > 0) {
+          const possible_thread_amount = Math.floor(server_available_ram / script_ram.grow_ram)
+          const threads_to_use = Math.min(possible_thread_amount, state.threads.grow.required - allocated_result.current_threads_count.grow)
+          allocated_result.current_threads_count.grow += threads_to_use
+          server_available_ram -= threads_to_use * script_ram.grow_ram
+          allocated_result.allocated_threads.grow.push({ server, amount: threads_to_use })
+          allocated_result.script_counter += 1
+        }
+        if (allocated_result.script_counter >= CONFIG.SCRIPT_LIMIT) break
+        if (server_available_ram > script_ram.weaken_ram && state.threads.weaken.required - allocated_result.current_threads_count.weaken > 0) {
+          const possible_thread_amount = Math.floor(server_available_ram / script_ram.weaken_ram)
+          const threads_to_use = Math.min(possible_thread_amount, state.threads.weaken.required - allocated_result.current_threads_count.weaken)
+          allocated_result.current_threads_count.weaken += threads_to_use
+          allocated_result.allocated_threads.weaken.push({ server, amount: threads_to_use })
+          allocated_result.script_counter += 1
+        }
+      }
+        
+      return allocated_result
+    }
 
-				const threads_to_use = Math.min(possible_thread_amount, needed_threads)
-				if (threads_to_use > 0) {
-					const has_succeeded = ns.exec(script, passed_target, threads_to_use, ...[state.target.server, state.longest_time - duration])
-					if (has_succeeded != 0) {
-						available_ram -= threads_to_use * script_ram
-						current += threads_to_use
-						has_ram = check_ram(available_ram)
-					}
-				}
-
-				return current
+		function count_number_of_scripts_servers(servers : string[]){
+			let current_script_counter = 0
+			for(const server of servers){
+				current_script_counter += ns.ps(server).length
 			}
-
-			function check_ram(passed_ram: number) {
-				if (passed_ram > hack_ram || passed_ram > grow_ram || passed_ram > weaken_ram) {
-					return true
-				} else return false
-			}
+			return current_script_counter
 		}
 
-    function analyze_threads(passed_servers){
-      let estimated_threads{
-        hack: []
-        grow: []
-        weaken: []
+    function execute_threads(allocated_threads: any) {
+      for (const thread of allocated_threads.hack) {
+        ns.exec("hack.js", thread.server, thread.amount, state.target.server, state.longest_time - ns.getHackTime(state.target.server))
       }
-
-      for(server of passed_servers){
-        
+      
+      for (const thread of allocated_threads.grow) {
+        ns.exec("grow.js", thread.server, thread.amount, state.target.server, state.longest_time - ns.getGrowTime(state.target.server))
+      }
+      
+      for (const thread of allocated_threads.weaken) {
+        ns.exec("weaken.js", thread.server, thread.amount, state.target.server, state.longest_time - ns.getWeakenTime(state.target.server))
       }
     }
 
-    function calculate_total_ram(passed_servers){
-      let total_ram = 0
-      for(server of passed_server){
-        total_ram += ns.getServerMaxRam(server)
-      }
+    function calculate_server_available_ram(server : string){
+        return ns.getServerMaxRam(server) - ns.getServerUsedRam(server)
     }
 
 		function calc_hack_threads(passed_target: string, passed_pecentage: number) {
@@ -409,4 +397,3 @@ export async function main(ns: NS) {
 		}
 	}
 }
-
